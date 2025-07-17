@@ -1,6 +1,7 @@
 import pandas as pd
 import numpy as np
 import os
+from database import DatabaseManager, init_database
 
 def create_sample_concrete_data():
     """
@@ -44,20 +45,54 @@ def create_sample_concrete_data():
 
 def load_concrete_data():
     """
-    Load concrete strength dataset
+    Load concrete strength dataset from database or create sample data
     """
-    # Try to load from uploaded files first
+    # Initialize database
+    init_database()
+    
+    # Try to load from database first
+    db_manager = DatabaseManager()
     try:
-        # Check if Excel file exists
+        df = db_manager.load_dataset()
+        if df is not None and len(df) > 0:
+            print(f"Loaded {len(df)} records from database")
+            return df
+    except Exception as e:
+        print(f"Could not load from database: {e}")
+    finally:
+        db_manager.close()
+    
+    # Try to load from uploaded files
+    try:
         if os.path.exists('attached_assets/Concrete_Data_1752784302540.xls'):
             df = pd.read_excel('attached_assets/Concrete_Data_1752784302540.xls')
+            # Save to database for future use
+            save_data_to_database(df, source='uploaded')
             return df
     except Exception as e:
         print(f"Could not load Excel file: {e}")
     
-    # If no file found, create sample data
+    # If no data found, create sample data and save to database
     print("Creating sample concrete dataset...")
-    return create_sample_concrete_data()
+    df = create_sample_concrete_data()
+    save_data_to_database(df, source='synthetic')
+    return df
+
+def save_data_to_database(df, source='synthetic'):
+    """
+    Save dataframe to database
+    """
+    db_manager = DatabaseManager()
+    try:
+        success = db_manager.save_dataset(df, source=source)
+        if success:
+            print(f"Saved {len(df)} records to database")
+        else:
+            print("Failed to save data to database")
+    except Exception as e:
+        print(f"Error saving to database: {e}")
+    finally:
+        db_manager.close()
 
 def get_feature_names():
     """

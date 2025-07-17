@@ -2,6 +2,7 @@ import numpy as np
 import pandas as pd
 from utilities import normalize_features, eval_cost, eval_gradient, predict_strength
 from sklearn.model_selection import train_test_split
+from database import DatabaseManager
 
 class ConcreteStrengthModel:
     def __init__(self):
@@ -11,6 +12,8 @@ class ConcreteStrengthModel:
         self.feature_std = None
         self.cost_history = []
         self.is_trained = False
+        self.model_id = None
+        self.model_name = None
         
     def prepare_data(self, df):
         """
@@ -29,6 +32,11 @@ class ConcreteStrengthModel:
         """
         Train the concrete strength prediction model
         """
+        # Store training parameters for database saving
+        self.last_learning_rate = learning_rate
+        self.last_num_iterations = num_iterations
+        self.last_test_size = test_size
+        
         # Split data into training and testing sets
         X_train, X_test, y_train, y_test = train_test_split(
             X, y, test_size=test_size, random_state=random_state
@@ -71,7 +79,8 @@ class ConcreteStrengthModel:
         train_r2 = self.calculate_r2(y_train, train_predictions)
         test_r2 = self.calculate_r2(y_test, test_predictions)
         
-        return {
+        # Store results for database saving
+        results = {
             'train_cost': train_cost,
             'test_cost': test_cost,
             'train_r2': train_r2,
@@ -83,6 +92,9 @@ class ConcreteStrengthModel:
             'train_predictions': train_predictions,
             'test_predictions': test_predictions
         }
+        self.last_training_results = results
+        
+        return results
     
     def predict(self, input_features):
         """
@@ -119,14 +131,39 @@ class ConcreteStrengthModel:
         r2 = 1 - (ss_res / ss_tot)
         return r2
     
-    def save_model(self, filename='concrete_strength_model.npz'):
+    def save_model(self, model_name='default_model', filename='concrete_strength_model.npz'):
         """
-        Save trained model parameters
+        Save trained model parameters to database and file
         """
         if not self.is_trained:
             raise ValueError("Model must be trained before saving")
         
-        guidelines = """
+        # Save to database
+        db_manager = DatabaseManager()
+        try:
+            training_params = {
+                'learning_rate': getattr(self, 'last_learning_rate', 0.01),
+                'num_iterations': getattr(self, 'last_num_iterations', 1000),
+                'test_size': getattr(self, 'last_test_size', 0.2)
+            }
+            
+            training_results = getattr(self, 'last_training_results', {})
+            
+            self.model_id = db_manager.save_model(
+                self, model_name, training_params, training_results
+            )
+            self.model_name = model_name
+            
+            if self.model_id:
+                print(f"Model saved to database with ID: {self.model_id}")
+        except Exception as e:
+            print(f"Failed to save model to database: {e}")
+        finally:
+            db_manager.close()
+        
+        # Save to file (backup)
+        try:
+            guidelines = """
 x_norm = (x_input - feature_mean) / feature_std   # This is a numpy broadcasting operation
 y_predict = np.dot(x_norm, weights_norm) + bias_norm
 
@@ -141,18 +178,40 @@ feature_title = ['Cement Quantity',      # Kg/m3
                  
 Only one output is expected, that is concrete strength in MPa
 """
-        
-        np.savez(filename,
-                weights_norm=self.weights,
-                bias_norm=self.bias,
-                feature_mean=self.feature_mean,
-                feature_std=self.feature_std,
-                pred_guidelines=guidelines)
+            
+            np.savez(filename,
+                    weights_norm=self.weights,
+                    bias_norm=self.bias,
+                    feature_mean=self.feature_mean,
+                    feature_std=self.feature_std,
+                    pred_guidelines=guidelines)
+        except Exception as e:
+            print(f"Failed to save model to file: {e}")
     
-    def load_model(self, filename='concrete_strength_model.npz'):
+    def load_model(self, model_name=None, filename='concrete_strength_model.npz'):
         """
-        Load trained model parameters
+        Load trained model parameters from database or file
         """
+        # Try to load from database first
+        db_manager = DatabaseManager()
+        try:
+            model_data = db_manager.load_model(model_name)
+            if model_data:
+                self.weights = model_data['weights']
+                self.bias = model_data['bias']
+                self.feature_mean = model_data['feature_mean']
+                self.feature_std = model_data['feature_std']
+                self.model_id = model_data['id']
+                self.model_name = model_data['model_name']
+                self.is_trained = True
+                print(f"Model '{model_data['model_name']}' loaded from database")
+                return True
+        except Exception as e:
+            print(f"Failed to load model from database: {e}")
+        finally:
+            db_manager.close()
+        
+        # Fallback to file loading
         try:
             model_data = np.load(filename)
             self.weights = model_data['weights_norm']
@@ -160,6 +219,42 @@ Only one output is expected, that is concrete strength in MPa
             self.feature_mean = model_data['feature_mean']
             self.feature_std = model_data['feature_std']
             self.is_trained = True
+            print(f"Model loaded from file: {filename}")
             return True
         except FileNotFoundError:
+            print(f"No model file found: {filename}")
             return False
+    
+    def predict_and_save(self, input_features, notes=None):
+        """
+        Make prediction and save to database
+        """
+        if not self.is_trained:
+            raise ValueError("Model must be trained before making predictions")
+        
+        # Make prediction
+        prediction = self.predict(input_features)
+        
+        # Classify strength
+        if prediction < 20:
+            classification = "Low Strength"
+        elif prediction < 40:
+            classification = "Medium Strength"
+        elif prediction < 60:
+            classification = "High Strength"
+        else:
+            classification = "Very High Strength"
+        
+        # Save to database if model_id is available
+        if self.model_id:
+            db_manager = DatabaseManager()
+            try:
+                db_manager.save_prediction(
+                    self.model_id, input_features, prediction, classification, notes
+                )
+            except Exception as e:
+                print(f"Failed to save prediction to database: {e}")
+            finally:
+                db_manager.close()
+        
+        return prediction, classification

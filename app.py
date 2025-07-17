@@ -8,6 +8,7 @@ from plotly.subplots import make_subplots
 
 from data_loader import load_concrete_data, get_feature_names, get_feature_ranges
 from ml_model import ConcreteStrengthModel
+from database import DatabaseManager, init_database
 
 # Configure page
 st.set_page_config(
@@ -17,6 +18,9 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
+# Initialize database
+init_database()
+
 # Initialize session state
 if 'model' not in st.session_state:
     st.session_state.model = ConcreteStrengthModel()
@@ -24,6 +28,8 @@ if 'data_loaded' not in st.session_state:
     st.session_state.data_loaded = False
 if 'model_trained' not in st.session_state:
     st.session_state.model_trained = False
+if 'db_manager' not in st.session_state:
+    st.session_state.db_manager = DatabaseManager()
 
 def load_data():
     """Load and cache the concrete dataset"""
@@ -69,7 +75,9 @@ def main():
         "📊 Data Overview", 
         "🤖 Model Training", 
         "🔮 Prediction", 
-        "📈 Model Performance"
+        "📈 Model Performance",
+        "💾 Database Management",
+        "📋 Prediction History"
     ])
     
     if page == "📊 Data Overview":
@@ -80,6 +88,10 @@ def main():
         show_prediction_interface()
     elif page == "📈 Model Performance":
         show_model_performance()
+    elif page == "💾 Database Management":
+        show_database_management()
+    elif page == "📋 Prediction History":
+        show_prediction_history()
 
 def show_data_overview():
     st.header("📊 Dataset Overview")
@@ -278,7 +290,21 @@ def show_prediction_interface():
         input_values['Age']
     ])
     
-    prediction = st.session_state.model.predict(input_array)
+    # Use predict_and_save to automatically save to database
+    try:
+        prediction, classification = st.session_state.model.predict_and_save(input_array)
+    except:
+        # Fallback to regular prediction if database save fails
+        prediction = st.session_state.model.predict(input_array)
+        # Classify strength
+        if prediction < 20:
+            classification = "Low Strength"
+        elif prediction < 40:
+            classification = "Medium Strength"
+        elif prediction < 60:
+            classification = "High Strength"
+        else:
+            classification = "Very High Strength"
     
     st.markdown("---")
     st.subheader("🎯 Prediction Result")
@@ -291,21 +317,17 @@ def show_prediction_interface():
             delta=None
         )
         
-        # Add strength classification
-        if prediction < 20:
-            strength_class = "Low Strength"
+        # Display classification with color indicator
+        if classification == "Low Strength":
             color = "🔴"
-        elif prediction < 40:
-            strength_class = "Medium Strength"
+        elif classification == "Medium Strength":
             color = "🟡"
-        elif prediction < 60:
-            strength_class = "High Strength"
+        elif classification == "High Strength":
             color = "🟢"
         else:
-            strength_class = "Very High Strength"
             color = "🟢"
         
-        st.markdown(f"**Classification:** {color} {strength_class}")
+        st.markdown(f"**Classification:** {color} {classification}")
     
     # Show input summary
     st.subheader("📋 Input Summary")
@@ -472,11 +494,196 @@ def show_model_performance():
     
     with col2:
         if st.button("📁 Load Model"):
-            if st.session_state.model.load_model('concrete_strength_model.npz'):
+            if st.session_state.model.load_model():
                 st.success("Model loaded successfully!")
                 st.session_state.model_trained = True
             else:
                 st.error("No saved model found!")
+
+def show_database_management():
+    st.header("💾 Database Management")
+    
+    # Database statistics
+    st.subheader("Database Statistics")
+    
+    db_manager = DatabaseManager()
+    try:
+        # Dataset stats
+        dataset_stats = db_manager.get_dataset_stats()
+        if dataset_stats:
+            col1, col2, col3, col4 = st.columns(4)
+            with col1:
+                st.metric("Total Records", dataset_stats['total_count'])
+            with col2:
+                st.metric("Min Strength", f"{dataset_stats['min_strength']:.1f} MPa")
+            with col3:
+                st.metric("Max Strength", f"{dataset_stats['max_strength']:.1f} MPa")
+            with col4:
+                st.metric("Avg Strength", f"{dataset_stats['avg_strength']:.1f} MPa")
+        else:
+            st.info("No dataset records found in database")
+        
+        # Model management
+        st.subheader("Saved Models")
+        models = db_manager.get_model_list()
+        
+        if models:
+            # Create a DataFrame for better display
+            model_df = pd.DataFrame(models)
+            model_df['created_at'] = pd.to_datetime(model_df['created_at']).dt.strftime('%Y-%m-%d %H:%M')
+            
+            # Display models table
+            st.dataframe(
+                model_df[['model_name', 'train_r2', 'test_r2', 'created_at', 'is_active']],
+                use_container_width=True
+            )
+            
+            # Model selection and loading
+            col1, col2 = st.columns(2)
+            with col1:
+                selected_model = st.selectbox(
+                    "Select Model to Load",
+                    options=[m['model_name'] for m in models],
+                    index=0
+                )
+            
+            with col2:
+                if st.button("Load Selected Model"):
+                    if st.session_state.model.load_model(selected_model):
+                        st.success(f"Model '{selected_model}' loaded successfully!")
+                        st.session_state.model_trained = True
+                        st.rerun()
+                    else:
+                        st.error("Failed to load model")
+        else:
+            st.info("No trained models found in database")
+        
+        # Model saving
+        st.subheader("Save Current Model")
+        if st.session_state.model_trained:
+            model_name = st.text_input("Model Name", value="my_concrete_model")
+            if st.button("Save Model to Database"):
+                st.session_state.model.save_model(model_name)
+                st.success("Model saved to database!")
+                st.rerun()
+        else:
+            st.warning("Train a model first before saving")
+    
+    except Exception as e:
+        st.error(f"Database error: {str(e)}")
+    finally:
+        db_manager.close()
+
+def show_prediction_history():
+    st.header("📋 Prediction History")
+    
+    db_manager = DatabaseManager()
+    try:
+        # Get prediction history
+        history = db_manager.get_prediction_history(limit=100)
+        
+        if history:
+            st.subheader(f"Recent Predictions ({len(history)} records)")
+            
+            # Convert to DataFrame for better display
+            history_df = pd.DataFrame(history)
+            history_df['created_at'] = pd.to_datetime(history_df['created_at']).dt.strftime('%Y-%m-%d %H:%M')
+            
+            # Display summary statistics
+            col1, col2, col3, col4 = st.columns(4)
+            with col1:
+                st.metric("Total Predictions", len(history))
+            with col2:
+                avg_strength = history_df['predicted_strength'].mean()
+                st.metric("Avg Predicted Strength", f"{avg_strength:.1f} MPa")
+            with col3:
+                max_strength = history_df['predicted_strength'].max()
+                st.metric("Max Predicted Strength", f"{max_strength:.1f} MPa")
+            with col4:
+                # Count by classification
+                most_common = history_df['strength_classification'].mode().iloc[0]
+                st.metric("Most Common Class", most_common)
+            
+            # Classification distribution
+            st.subheader("Strength Classification Distribution")
+            classification_counts = history_df['strength_classification'].value_counts()
+            
+            fig = go.Figure(data=[
+                go.Bar(x=classification_counts.index, y=classification_counts.values)
+            ])
+            fig.update_layout(
+                title="Distribution of Strength Classifications",
+                xaxis_title="Classification",
+                yaxis_title="Count",
+                height=400
+            )
+            st.plotly_chart(fig, use_container_width=True)
+            
+            # Strength prediction timeline
+            st.subheader("Prediction Timeline")
+            fig = go.Figure()
+            
+            # Convert datetime for plotting
+            history_df['datetime'] = pd.to_datetime(history_df['created_at'])
+            
+            fig.add_trace(go.Scatter(
+                x=history_df['datetime'],
+                y=history_df['predicted_strength'],
+                mode='markers+lines',
+                name='Predicted Strength',
+                hovertemplate='<b>%{y:.1f} MPa</b><br>%{x}<extra></extra>'
+            ))
+            
+            fig.update_layout(
+                title="Predicted Strength Over Time",
+                xaxis_title="Date",
+                yaxis_title="Predicted Strength (MPa)",
+                height=400
+            )
+            st.plotly_chart(fig, use_container_width=True)
+            
+            # Detailed history table
+            st.subheader("Detailed History")
+            
+            # Select columns to display
+            display_columns = [
+                'cement', 'blast_furnace_slag', 'fly_ash', 'water',
+                'superplasticizer', 'coarse_aggregate', 'fine_aggregate', 'age',
+                'predicted_strength', 'strength_classification', 'created_at'
+            ]
+            
+            # Format column names for display
+            formatted_df = history_df[display_columns].copy()
+            formatted_df.columns = [
+                'Cement', 'Blast Furnace Slag', 'Fly Ash', 'Water',
+                'Superplasticizer', 'Coarse Aggregate', 'Fine Aggregate', 'Age',
+                'Predicted Strength', 'Classification', 'Date'
+            ]
+            
+            # Round numerical columns
+            numeric_columns = ['Cement', 'Blast Furnace Slag', 'Fly Ash', 'Water',
+                             'Superplasticizer', 'Coarse Aggregate', 'Fine Aggregate', 'Predicted Strength']
+            for col in numeric_columns:
+                formatted_df[col] = formatted_df[col].round(1)
+            
+            st.dataframe(formatted_df, use_container_width=True)
+            
+            # Export functionality
+            if st.button("📥 Download Prediction History"):
+                csv = formatted_df.to_csv(index=False)
+                st.download_button(
+                    label="Download CSV",
+                    data=csv,
+                    file_name=f"prediction_history_{pd.Timestamp.now().strftime('%Y%m%d_%H%M%S')}.csv",
+                    mime="text/csv"
+                )
+        else:
+            st.info("No prediction history found. Make some predictions first!")
+    
+    except Exception as e:
+        st.error(f"Error loading prediction history: {str(e)}")
+    finally:
+        db_manager.close()
 
 if __name__ == "__main__":
     main()
