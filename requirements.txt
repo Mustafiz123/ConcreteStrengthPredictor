@@ -68,3 +68,4 @@ urllib3==2.5.0
 virtualenv==20.31.2
 watchdog==6.0.0
 flask
+gunicorn
